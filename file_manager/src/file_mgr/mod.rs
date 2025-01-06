@@ -1,18 +1,25 @@
 pub mod test;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::{Cursor, Seek, SeekFrom, Write, Read};
+use std::io;
+use std::fs;
+use std::collections::HashMap;
+use std::fs::File;
+use walkdir::WalkDir;
+use std::sync::{Arc, RwLock};
+use std::path::Path;
 
 #[derive(Debug)]
 pub struct BlockId {
     //block taken from given binary file
     file_name: String, 
     //block number into the binary file
-    blk_num: u32,
+    blk_num: u64,
 }
 
 impl BlockId {
-    pub fn new(file_name: &str, blk_num : u32) -> Self {
+    pub fn new(file_name: &str, blk_num : u64) -> Self {
         BlockId {
             file_name: String::from(file_name),
             blk_num,
@@ -23,7 +30,7 @@ impl BlockId {
          self.file_name.clone()
     }
 
-    pub fn number(&self) -> u32 {
+    pub fn number(&self) -> u64 {
         self.blk_num
     }
 
@@ -151,7 +158,144 @@ impl<'t> Page <'t>{
         return 4 + str_len;
     }
 
-    pub fn contents(&self) -> &Vec<u8> {
+    pub fn contents(&mut self) -> &mut Vec<u8> {
         self.bb
+    }
+}
+
+pub struct FileMgr {
+    //prepare for concurrent accessing low level binary files
+    open_files: Arc<RwLock<HashMap<String, RwLock<File> >>>,
+    //dir to save binary file
+    directory: String,
+    //whether the given directory is exist or not
+    //if not then we create the directory and set is_new to true
+    //otherwise set to false
+    is_new:  bool,
+
+    block_size: u64,
+}
+
+fn delete_temp_files(directory: &str) -> io::Result<()> {
+    for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+
+        // Check if the entry is a file and its name ends with "temp"
+        if path.is_file() {
+            if let Some(file_name) = path.file_name() {
+                if let Some(file_name_str) = file_name.to_str() {
+                    if file_name_str.ends_with("temp") {
+                        // Delete the file
+                        fs::remove_file(&path)?;
+                        println!("Deleted: {:?}", path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+impl FileMgr {
+    pub fn new(db_directory: String, block_size: u64) -> Self{
+        //check given directory exist or not 
+        let is_new = !(Path::new(db_directory.as_str()).exists() && Path::new(db_directory.as_str()).is_dir());
+        
+        //dierctory not exist then create it
+        if is_new {
+            fs::create_dir_all(db_directory.clone()).unwrap();
+        } else {
+            //delete temp files
+            let _ = delete_temp_files(&db_directory);
+        }
+
+        FileMgr{
+            open_files: Arc::new(RwLock::new(HashMap::new())),
+            directory: db_directory,
+            is_new,
+            block_size,
+        }
+    }
+
+    pub fn read_write(&self ,blk: &BlockId, p: &mut Page, is_write: bool) -> Result<usize, String> {
+        /*
+        read given binary file from given offset, file name and offset
+        can get from BlockId, take cocurrent read into concerns
+        */
+        let map_guard = self.open_files.read().unwrap();
+        let file_name = blk.file_name();
+        if let Some(file_lock) = map_guard.get(&file_name) {
+            let mut file_guard = file_lock.write().unwrap();
+            let meta_data = file_guard.metadata().unwrap();
+            let offset = blk.number() * self.block_size;
+            if offset >= meta_data.len() {
+                return Err(format!("offset out bound of given file:{}", file_name));
+            }
+            file_guard.seek(SeekFrom::Start(offset)).unwrap();
+            if !is_write {
+                let bytes_read = file_guard.read(p.contents()).unwrap();
+                Ok(bytes_read)
+            } else {
+                let bytes_write = file_guard.write(p.contents()).unwrap();
+                Ok(bytes_write)
+            }
+            
+        } else {
+            Err(format!("file with name:{} not found", file_name))
+        }
+    }
+
+   pub fn append(&mut self, file_name: String) ->Result<BlockId, String> {
+      let map_guard = self.open_files.read().unwrap();
+      if let Some(file_lock) = map_guard.get(&file_name) {
+          let new_blk_num = self.length(file_name.clone()).unwrap();
+          //enlarge the file with block size at the end
+          let file_guard = file_lock.write().unwrap();
+          let meta_data = file_guard.metadata().unwrap();
+          let new_size = meta_data.len() + self.block_size;
+          file_guard.set_len(new_size).unwrap();
+          Ok(BlockId::new(file_name.as_str(), new_blk_num))
+      } else {
+          return Err(format!("file with name: {} not found", file_name));
+      }
+   }
+
+   fn length(&self, file_name: String) -> Result<u64, String> {
+        let map_guard = self.open_files.read().unwrap();
+        if let Some(file_lock) = map_guard.get(&file_name) {
+            //compute how many blocks in the file
+            let mut file_guard = file_lock.read().unwrap();
+            let meta_data = file_guard.metadata().unwrap();
+            Ok(meta_data.len() / self.block_size)
+        } else {
+            Err(format!("file : {} not found", file_name))
+        }
+   }
+
+    pub fn is_new(&self) -> bool {
+        self.is_new
+    }
+
+    pub fn add_file(&mut self,file_name: String) -> io::Result<()> {
+        let file_path = format!("{}/{}", self.directory, file_name);
+        
+        let file = if Path::new(&file_path).exists() {
+            // Step 2: Open the file if it exists
+            File::open(&file_path)?
+        } else {
+            // Step 2: Create the file if it does not exist
+            File::create(&file_path)?
+        };
+
+        let file_lock = RwLock::new(file);
+        let mut map_guard = self.open_files.write().unwrap();
+        map_guard.insert(file_name.to_string(), file_lock).unwrap();
+
+        Ok(())
+    }
+
+    pub fn block_size(&self) ->u64 {
+        self.block_size
     }
 }
