@@ -6,9 +6,12 @@ use std::io;
 use std::fs;
 use std::collections::HashMap;
 use std::fs::File;
+use std::os::fd::AsRawFd;
 use walkdir::WalkDir;
 use std::sync::{Arc, RwLock};
 use std::path::Path;
+use std::fs::OpenOptions;
+
 
 #[derive(Debug)]
 pub struct BlockId {
@@ -218,23 +221,36 @@ impl FileMgr {
         }
     }
 
-    pub fn read_write(&self ,blk: &BlockId, p: &mut Page, is_write: bool) -> Result<usize, String> {
+    pub fn read_write(&mut self ,blk: &BlockId, p: &mut Page, is_write: bool) -> Result<usize, String> {
         /*
         read given binary file from given offset, file name and offset
         can get from BlockId, take cocurrent read into concerns
         */
+        //check file exist or not, if not should call add_file to create file
+        self.add_file(blk.file_name()).unwrap();
+        if is_write {
+              /*
+                if the write position is beyond the length of the file, then we 
+                extend the file to the given block
+                */
+            self.extend(blk);
+        }
+
         let map_guard = self.open_files.read().unwrap();
         let file_name = blk.file_name();
         if let Some(file_lock) = map_guard.get(&file_name) {
             let mut file_guard = file_lock.write().unwrap();
             let meta_data = file_guard.metadata().unwrap();
             let offset = blk.number() * self.block_size;
+           
             if offset >= meta_data.len() {
                 return Err(format!("offset out bound of given file:{}", file_name));
             }
+            
             file_guard.seek(SeekFrom::Start(offset)).unwrap();
+
             if !is_write {
-                let bytes_read = file_guard.read(p.contents()).unwrap();
+                let bytes_read = file_guard.read( p.contents()).unwrap();
                 Ok(bytes_read)
             } else {
                 let bytes_write = file_guard.write(p.contents()).unwrap();
@@ -245,6 +261,12 @@ impl FileMgr {
             Err(format!("file with name:{} not found", file_name))
         }
     }
+
+    fn extend(&mut self, blk :&BlockId) {
+           while self.length(blk.file_name()).unwrap() <= blk.number() {
+                let _ = self.append(blk.file_name());
+           }
+       } 
 
    pub fn append(&mut self, file_name: String) ->Result<BlockId, String> {
       let map_guard = self.open_files.read().unwrap();
@@ -265,7 +287,7 @@ impl FileMgr {
         let map_guard = self.open_files.read().unwrap();
         if let Some(file_lock) = map_guard.get(&file_name) {
             //compute how many blocks in the file
-            let mut file_guard = file_lock.read().unwrap();
+            let file_guard = file_lock.read().unwrap();
             let meta_data = file_guard.metadata().unwrap();
             Ok(meta_data.len() / self.block_size)
         } else {
@@ -277,20 +299,28 @@ impl FileMgr {
         self.is_new
     }
 
-    pub fn add_file(&mut self,file_name: String) -> io::Result<()> {
+    fn add_file(&mut self,file_name: String) -> io::Result<()> {
+        /*
+        check file opened or not, using scope here to make sure the guard
+        */
+        let map_guard = self.open_files.read().unwrap();
+        if map_guard.contains_key(file_name.as_str()) {
+            return Ok(())
+        }
+        //release the read lock for getting write lock at following
+        drop(map_guard);
+
         let file_path = format!("{}/{}", self.directory, file_name);
-        
-        let file = if Path::new(&file_path).exists() {
-            // Step 2: Open the file if it exists
-            File::open(&file_path)?
-        } else {
-            // Step 2: Create the file if it does not exist
-            File::create(&file_path)?
-        };
+        //open file for read and write
+        let  file = OpenOptions::new()
+        .read(true)  // Allow reading
+        .write(true) // Allow writing
+        .create(true) // Create the file if it doesn't exist
+        .open(file_path)?;
 
         let file_lock = RwLock::new(file);
         let mut map_guard = self.open_files.write().unwrap();
-        map_guard.insert(file_name.to_string(), file_lock).unwrap();
+        map_guard.entry(file_name.to_string()).or_insert(file_lock);
 
         Ok(())
     }
