@@ -6,7 +6,6 @@ use std::io;
 use std::fs;
 use std::collections::HashMap;
 use std::fs::File;
-use std::os::fd::AsRawFd;
 use walkdir::WalkDir;
 use std::sync::{Arc, RwLock};
 use std::path::Path;
