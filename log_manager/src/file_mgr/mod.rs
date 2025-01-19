@@ -12,7 +12,7 @@ use std::path::Path;
 use std::fs::OpenOptions;
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockId {
     //block taken from given binary file
     file_name: String, 
@@ -64,7 +64,7 @@ impl<'t> Page <'t>{
         try_into is a trait, it will find the given object implement
         the trait for converting to the given type
         */
-        if offset + 4 >= self.bb.capacity().try_into().unwrap() {
+        if offset + 4 > self.bb.capacity().try_into().unwrap() {
             let err_msg = format!("get_int overflow, offset+4:{}, buffer cap:{}", offset+4, self.bb.capacity());
             return Err(err_msg);
         }
@@ -86,7 +86,8 @@ impl<'t> Page <'t>{
 
     pub fn set_int(&mut self, offset: usize, n: i32) ->Result<(), String>{
         //need to check buffer overflow
-        if offset + 4 >= self.bb.capacity() {
+        //change here
+        if offset + 4 > self.bb.capacity() {
             let err_msg =format!("set_int buffer overflow offset+4:{}, buffer cap:{}", offset+4, self.bb.capacity()); 
             return Err(err_msg);
         }
@@ -126,7 +127,8 @@ impl<'t> Page <'t>{
     }
 
     pub fn set_bytes(&mut self, offset: usize, bytes: &[u8]) ->Result<(), String> {
-        if offset + 4 + bytes.len() >= self.bb.capacity() {
+        //change here
+        if offset + 4 + bytes.len() > self.bb.capacity() {
             let err_msg = format!("set bytes overflow: offset+4+bytes.leng():{}, buffer cap:{}", offset + 4 + bytes.len(), self.bb.capacity());
             return Err(err_msg);
         }
@@ -282,7 +284,7 @@ impl FileMgr {
       }
    }
 
-   fn length(&self, file_name: String) -> Result<u64, String> {
+   pub fn length(&self, file_name: String) -> Result<u64, String> {
         let map_guard = self.open_files.read().unwrap();
         if let Some(file_lock) = map_guard.get(&file_name) {
             //compute how many blocks in the file
