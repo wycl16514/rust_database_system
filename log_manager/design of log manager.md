@@ -12,11 +12,13 @@ Create a new folder name "log_mgr" and add a mod.rs inside it, then add the foll
 
 ```rs
 
+pub mod test;
 use crate::file_mgr::*;
 
-use std::{fs::File, sync::{Arc, Mutex}};
+use std::sync::{Arc, Mutex};
+
+//notice the changes in file_mgr for set_int and set_bytes
 pub struct LogMgr<'t>{
-   
     fm :  &'t mut FileMgr,
     //file name to save log info
     log_file: String,
@@ -42,7 +44,11 @@ pub struct LogMgr<'t>{
     */
     last_saved_lsn: u64,
 
-  
+    //from here for iterator
+    current_pos: i32,
+    iter_init: bool,
+    iter_blk: BlockId,
+    buf_for_inter: Vec<u8>,
 }
 
 impl<'t> LogMgr<'t> {
@@ -69,13 +75,21 @@ impl<'t> LogMgr<'t> {
             }
         };
 
+        let blk = BlockId::new(&log_file_name, 0);
+        let block_size = fm.block_size();
         let  log_mgr = LogMgr {
             fm,
             log_file: log_file_name.clone(),
             log_buf: Arc::new(Mutex::new(log_buf.clone())),
             latest_lsn: 0,
             last_saved_lsn: 0,
-            current_blk: blk,
+            current_blk: blk.clone(),
+
+            //for iterator
+            current_pos: 0,
+            iter_init: true,
+            iter_blk: blk,
+            buf_for_inter: vec![0u8; block_size as usize],
         };
 
         return log_mgr;
@@ -107,6 +121,13 @@ impl<'t> LogMgr<'t> {
       return  blk;
    }
 
+   fn get_boundary(&self) -> i32 {
+       let mut log_buf = self.log_buf.lock().unwrap();
+       let mut p = Page::from_buffer(&mut log_buf);
+       let boundary = p.get_int(0).unwrap();
+       boundary
+   }
+
    pub fn append(&mut self , log_rec: &Vec<u8>) -> u64 {
         /*
       \ when append log record to current page, we append it from the end to the beginning,
@@ -117,11 +138,8 @@ impl<'t> LogMgr<'t> {
 
         By doing so, when we read the buffer from beginning to end, we get the latest 
         log record to oldest
-        */
-        //only need to read from the buf, that's why clone it and release the lock
-        let mut log_buf = self.log_buf.lock().unwrap().clone();
-        let mut p = Page::from_buffer(&mut log_buf);
-        let mut boundary = p.get_int(0).unwrap();
+        */ 
+        let mut boundary = self.get_boundary();
 
         let rec_size = log_rec.len() as i32;
         //4 bytes needs to record the length of log info length
@@ -141,21 +159,60 @@ impl<'t> LogMgr<'t> {
         }
 
         let rec_pos = boundary - bytes_needed;
-      
+        let mut log_buf = self.log_buf.lock().unwrap();
+        let mut p = Page::from_buffer(&mut log_buf);
         p.set_bytes(rec_pos as usize, &log_rec).unwrap();
         //set new boundary
         p.set_int(0, rec_pos).unwrap();
         self.latest_lsn += 1;
         return self.latest_lsn;
    }
+
+   //for iterator
+   fn move_to_block(&mut self) {
+        let mut p = Page::from_buffer(&mut self.buf_for_inter);
+        self.fm.read_write(&self.iter_blk, &mut p, false).unwrap();
+        self.current_pos = p.get_int(0).unwrap();
+   }
+}
+
+impl<'t> Iterator for LogMgr<'t> {
+    type Item = Vec<u8>;
+    fn next(&mut self) -> Option<Self::Item> {
+        /*
+        iterator will visit record in reverse order, for example
+        if we write log records as : rec0, rec1, rec2,
+        then the iterator will return:
+        rec2, rec1, rec0
+        */
+        if self.iter_init {
+            self.iter_init = false;
+            self.do_flush();
+            self.iter_blk = BlockId::new(&self.log_file, self.current_blk.number());
+            self.move_to_block();
+        }
+
+        if self.current_pos == self.fm.block_size() as i32 && self.iter_blk.number() == 0 {
+            return None;
+        }
+
+        if self.current_pos == self.fm.block_size() as i32 {
+            self.iter_blk = BlockId::new(&self.log_file, self.iter_blk.number() - 1);
+            self.move_to_block();
+        }
+
+        let mut p = Page::from_buffer(&mut self.buf_for_inter);
+        let log_rec = p.get_bytes(self.current_pos as usize).unwrap();
+        self.current_pos = self.current_pos + 4 + log_rec.len() as i32;
+        Some(log_rec)
+    }
 }
 `` `
-Now let's make the log manager iteratable, that is given the instance of log manager as log_mgr, we can read each log record as following:
-
+Notice that, the above code also make the log manager iteratable since it implements the Iterator trait, therefore we can use the log manager as following:
 ```rs
-let log_iter = log_mgr.iter()
-for log in log_iter {
-    //reading the log info here
+for log_rec in log_mgr {
+    //handling each log record here
 }
 ```
+For more about the design logic, please look at the comments in the code and following my video on udemy.
 
