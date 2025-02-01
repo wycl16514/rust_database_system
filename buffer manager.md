@@ -28,6 +28,32 @@ All in all, the buffer manager is some how like a kind of cache mechanism, which
 cache manager will swap out the content of given cache record if it is unused for the longest time, and the buffer manager will do the same, if there are several pages unpined, the manager will write the content for the unpined page that is
 unpined for the longest time. The different between buffer manager and cache manager is, the buffer manager know exactly which page is still in used, and this info can make buffer manager have better performance than cache manager.
 
+Let's see the simple cache algorithm used by the buffer manager, suppose the manager contains three pages initially:
+
+Manager: buffer(P1, P2, P3).
+
+Then the first clint ask the manger to read block 1 from file with name "f1":
+
+Manager: buffer(P2, P3).
+c1 -pin:1-> (P1, "f1", block 0),
+
+if the second client also want to read the content of block 0 of file "f1", then the buffer manager will simply return the P1 to 1:
+
+c1, c2 - pin:2 -> (P1, "f1", block 0)
+
+Then, another two clients want to write to file "f2" , block2, and "f3", block 3, then we have:
+
+c3 -> pin: 1 -> (P2, "f2", block 2)
+
+c4 -> pin: 1 -> (P3, "f3", block 3)
+
+If at this time comes another client c5 want to read file "f4", block 4, since there are not available buffer or pages any more, the buffer manager will put client c5 on the wait list for 10 seconds. After 10 seconds, if there is avaiabale
+page, then c5 can pin the available page and read the content it needs. Otherwise c5 will wake up from sleep and decide to wait again or give up waiting and doing other jobs.
+
+When c3 complete its job with P2, then P2 will put back into available buffer list, if some other client want to read or write file "f2" block2 as c3 did, then buffer manager will pin p2 again and return p2 directly to the client 
+without any changes. Notice that we don't write back content of P2 back to disk file eventhough its changed, but if the client want to read file "f5" block 5, then this time ,the buffer manager will write content of P2 back to file "f2"
+and block 2, and fetch content from "f5" block 5, and pin it and return the page to client.
+
 
 
 
