@@ -1,5 +1,6 @@
 pub mod file_mgr;
 pub mod log_mgr;
+pub mod buf_mgr;
 use file_mgr::*;
 use log_mgr::*;
 
