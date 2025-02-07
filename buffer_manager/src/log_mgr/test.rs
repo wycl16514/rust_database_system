@@ -2,7 +2,7 @@ use super::LogMgr;
 use crate::file_mgr::*;
 use std::fs;
 use std::path::Path;
-
+use std::sync::{Arc, Mutex};
 
 static DIRECTORY : &str=  "./logtest";
 static LOGFILE: &str = "log_file.txt";
@@ -44,8 +44,9 @@ fn create_records(log_mgr :&mut LogMgr,start: u64, end: u64) {
 #[test]
 fn test_log_mgr_add_records() {
     remove_dir();
-    let mut file_mgr = FileMgr::new(DIRECTORY.to_string(), 400);
-    let mut log_mgr = LogMgr::new(&mut file_mgr, LOGFILE.to_string());
+    let  file_mgr = FileMgr::new(DIRECTORY.to_string(), 400);
+    let file_mgr_lock = Arc::new(Mutex::new(file_mgr));
+    let mut log_mgr = LogMgr::new(file_mgr_lock.clone(), LOGFILE.to_string());
     let start = 1;
     let mut end = 36;
     create_records(&mut log_mgr, start, end);

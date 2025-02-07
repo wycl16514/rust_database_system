@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use crate::file_mgr::*;
 use crate::log_mgr::*;
-
-pub struct Buffer<'a> {
-    fm: &'a Mutex<FileMgr>,
-    lm: &'a Mutex<LogMgr<'a>>,
+use log::{warn, info};
+pub mod test;
+pub struct Buffer {
+    fm:  Arc<Mutex<FileMgr>>,
+    lm:  Arc<Mutex<LogMgr>>,
     page_buf: Vec<u8>,
     blk: BlockId,
     pins: i32,
@@ -14,8 +15,8 @@ pub struct Buffer<'a> {
     lsn: i32,
 }
 
-impl<'a> Buffer<'a> {
-    pub fn new(fm: &'a Mutex<FileMgr>, lm: &'a Mutex<LogMgr<'a>>) -> Self {
+impl Buffer {
+    pub fn new(fm:  Arc<Mutex<FileMgr>>, lm:  Arc<Mutex<LogMgr>>) -> Self {
         let block_size = fm.lock().unwrap().block_size();
         Buffer {
             fm,
@@ -55,7 +56,19 @@ impl<'a> Buffer<'a> {
         self.flush();
         self.blk = b.clone();
         let mut p = Page::from_buffer(&mut self.page_buf);
-        self.fm.lock().unwrap().read_write(&self.blk, &mut p, false).unwrap();
+        /*
+        we don't have unwrap for read_write since the given file may not
+        have the given block then we read nothing from the file
+        */
+        let result = self.fm.lock().unwrap().read_write(&self.blk, &mut p, false);
+        match result {
+            Ok(bytes_read) => {
+                info!("buffer assign with block: {:?}, with bytes read: {}", self.blk.clone(), bytes_read);
+            },
+            Err(err) => {
+                warn!("buffer assign with block: {:?}, with err: {}", self.blk.clone(), err);
+            }
+        }
         self.pins = 0;
     }
 
@@ -68,31 +81,37 @@ impl<'a> Buffer<'a> {
         }
     }
 
-    pub fn pin(&mut self) {
+    pub fn pin(&mut self)  {
         self.pins += 1;
+        
     }
 
     pub fn unpin(&mut self) {
         self.pins -= 1;
     }
+
+    pub fn pin_count(&self) -> i32 {
+        self.pins
+    }
+
 }
 
-pub struct BufferMgr<'a> {
+pub struct BufferMgr {
     /*
     several threads may access the same buffer at the same time,
     that's why we need to have Arc<Mutex<Buffer>>> as Vec element
     */
-    buffer_pool: Arc<Vec<Arc<RwLock<Buffer<'a>>>>>,
+    buffer_pool: Arc<Vec<Arc<RwLock<Buffer>>>>,
     num_available: Arc<Mutex<u32>>,
     //telling all threads waiting for buffers to wake up
     wake_up: Arc<AtomicBool>,
 }
 
-impl<'a> BufferMgr<'a> {
-    pub fn new(fm: &'a Mutex<FileMgr>, lm: &'a Mutex<LogMgr<'a>>, num_buffers: u32) -> Self {
+impl BufferMgr {
+    pub fn new(fm:  Arc<Mutex<FileMgr>>, lm:  Arc<Mutex<LogMgr>>, num_buffers: u32) -> Self {
         let mut buf_vec = Vec::with_capacity(num_buffers as usize);
         for _ in 0..num_buffers {
-            let buf = Buffer::new(fm, lm);
+            let buf = Buffer::new(fm.clone(), lm.clone());
             buf_vec.push(Arc::new(RwLock::new(buf)));
         }
         BufferMgr {
@@ -158,14 +177,16 @@ impl<'a> BufferMgr<'a> {
        }
     }
 
-   fn increase_availabe_buff(&mut self, buffer_lock : Arc<RwLock<Buffer<'a>>>) {
+   fn increase_availabe_buff(&mut self, buffer_lock : Arc<RwLock<Buffer>>) {
         let mut num_available = self.num_available.lock().unwrap();
-        if !buffer_lock.read().unwrap().is_pinned() {
+        let mut buf = buffer_lock.write().unwrap();
+        if buf.is_pinned() {
             *num_available += 1;
+            buf.unpin();
         } 
    }
 
-    pub fn unpin(&mut self ,  buffer_lock: Arc<RwLock<Buffer<'a>>>) {
+    pub fn unpin(&mut self ,  buffer_lock: Arc<RwLock<Buffer>>) {
         self.increase_availabe_buff(buffer_lock);
         self.notify_all();
     }
@@ -226,7 +247,7 @@ impl<'a> BufferMgr<'a> {
         i
     }
 
-    pub fn pin(&mut self, blk: BlockId) -> Option<Arc<RwLock<Buffer<'a>>>> {
+    pub fn pin(&mut self, blk: BlockId) -> Option<Arc<RwLock<Buffer>>> {
         let time_stamp = Instant::now();
         let mut i = self.try_to_pin(blk.clone());
         while i.is_none() && !self.wait_too_long(time_stamp) {

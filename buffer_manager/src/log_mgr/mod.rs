@@ -5,8 +5,8 @@ use crate::file_mgr::*;
 use std::sync::{Arc, Mutex};
 
 //notice the changes in file_mgr for set_int and set_bytes
-pub struct LogMgr<'t>{
-    fm :  &'t mut FileMgr,
+pub struct LogMgr{
+    fm :   Arc<Mutex<FileMgr>>,
     //file name to save log info
     log_file: String,
 
@@ -38,10 +38,10 @@ pub struct LogMgr<'t>{
     buf_for_inter: Vec<u8>,
 }
 
-impl<'t> LogMgr<'t> {
-    pub fn new(fm: &'t mut FileMgr, log_file_name: String) -> Self {
-        let log_file_len = fm.length(log_file_name.clone());
-        let mut log_buf = vec![0u8; fm.block_size() as usize];
+impl LogMgr{
+    pub fn new(fm: Arc<Mutex<FileMgr>>, log_file_name: String) -> Self {
+        let log_file_len = fm.lock().unwrap().length(log_file_name.clone());
+        let mut log_buf = vec![0u8; fm.lock().unwrap().block_size() as usize];
         let mut p = Page::from_buffer(&mut log_buf);
 
         let blk: BlockId;
@@ -51,19 +51,19 @@ impl<'t> LogMgr<'t> {
                 read the last page of the log file
                 */
                 blk = BlockId::new(log_file_name.as_str(), log_size - 1);
-                fm.read_write(&blk, &mut p, false).unwrap();
+                fm.lock().unwrap().read_write(&blk, &mut p, false).unwrap();
             },
 
             Err(_) => {
                 blk = BlockId::new(&log_file_name, 0);
-                p.set_int(0, fm.block_size() as i32).unwrap();
+                p.set_int(0, fm.lock().unwrap().block_size() as i32).unwrap();
                 //the first write will create the file
-                fm.read_write(&blk, &mut p, true).unwrap();
+                fm.lock().unwrap().read_write(&blk, &mut p, true).unwrap();
             }
         };
 
         let blk = BlockId::new(&log_file_name, 0);
-        let block_size = fm.block_size();
+        let block_size = fm.lock().unwrap().block_size();
         let  log_mgr = LogMgr {
             fm,
             log_file: log_file_name.clone(),
@@ -88,7 +88,7 @@ impl<'t> LogMgr<'t> {
         */
         let mut log_buf = self.log_buf.lock().unwrap();
         let mut p = Page::from_buffer(&mut log_buf);
-        self.fm.read_write(&self.current_blk, &mut p, true).unwrap();
+        self.fm.lock().unwrap().read_write(&self.current_blk, &mut p, true).unwrap();
         self.last_saved_lsn = self.latest_lsn;
    }
 
@@ -101,10 +101,10 @@ impl<'t> LogMgr<'t> {
    fn append_new_block(&mut self) -> BlockId {
       //append a block at the end of log file
       let mut log_buf = self.log_buf.lock().unwrap();
-      let blk = self.fm.append(self.log_file.clone()).unwrap();
+      let blk = self.fm.lock().unwrap().append(self.log_file.clone()).unwrap();
       let mut p = Page::from_buffer(&mut log_buf);
-      p.set_int(0, self.fm.block_size() as i32).unwrap();
-      self.fm.read_write(&blk, &mut p, true).unwrap();
+      p.set_int(0, self.fm.lock().unwrap().block_size() as i32).unwrap();
+      self.fm.lock().unwrap().read_write(&blk, &mut p, true).unwrap();
       return  blk;
    }
 
@@ -142,7 +142,7 @@ impl<'t> LogMgr<'t> {
             self.do_flush();
             self.current_blk = self.append_new_block();
             //when append a new block, the boundary turns into the end of the page
-            boundary = self.fm.block_size() as i32;
+            boundary = self.fm.lock().unwrap().block_size() as i32;
         }
 
         let rec_pos = boundary - bytes_needed;
@@ -158,12 +158,12 @@ impl<'t> LogMgr<'t> {
    //for iterator
    fn move_to_block(&mut self) {
         let mut p = Page::from_buffer(&mut self.buf_for_inter);
-        self.fm.read_write(&self.iter_blk, &mut p, false).unwrap();
+        self.fm.lock().unwrap().read_write(&self.iter_blk, &mut p, false).unwrap();
         self.current_pos = p.get_int(0).unwrap();
    }
 }
 
-impl<'t> Iterator for LogMgr<'t> {
+impl Iterator for LogMgr {
     type Item = Vec<u8>;
     fn next(&mut self) -> Option<Self::Item> {
         /*
@@ -179,11 +179,11 @@ impl<'t> Iterator for LogMgr<'t> {
             self.move_to_block();
         }
 
-        if self.current_pos == self.fm.block_size() as i32 && self.iter_blk.number() == 0 {
+        if self.current_pos == self.fm.lock().unwrap().block_size() as i32 && self.iter_blk.number() == 0 {
             return None;
         }
 
-        if self.current_pos == self.fm.block_size() as i32 {
+        if self.current_pos == self.fm.lock().unwrap().block_size() as i32 {
             self.iter_blk = BlockId::new(&self.log_file, self.iter_blk.number() - 1);
             self.move_to_block();
         }
