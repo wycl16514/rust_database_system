@@ -168,7 +168,7 @@ impl BufferMgr {
         *self.num_available.lock().unwrap()
     }
 
-    pub fn flash_all(&mut self, tx_num: i32)  {
+    pub fn flush_all(&mut self, tx_num: i32)  {
        for buf_lock in  self.buffer_pool.iter() {
           let mut buf = buf_lock.write().unwrap();
           if buf.modifing_tx() == tx_num {
@@ -180,9 +180,10 @@ impl BufferMgr {
    fn increase_availabe_buff(&mut self, buffer_lock : Arc<RwLock<Buffer>>) {
         let mut num_available = self.num_available.lock().unwrap();
         let mut buf = buffer_lock.write().unwrap();
-        if buf.is_pinned() {
+        //change here
+        buf.unpin();
+        if !buf.is_pinned() {
             *num_available += 1;
-            buf.unpin();
         } 
    }
 
